@@ -265,7 +265,8 @@ impl AbstractTree for Tree {
         let config = self.tree_config();
         let mut versions = self.get_version_history_lock();
 
-        versions.upgrade_version(
+        // Clearing changes the tree's contents, so the new version is published
+        versions.upgrade_version_with_seqno(
             &config.path,
             |v| {
                 let mut copy = v.clone();
@@ -274,7 +275,7 @@ impl AbstractTree for Tree {
                 copy.version = Version::new(v.version.id() + 1, self.tree_type());
                 Ok(copy)
             },
-            &config.seqno,
+            config.seqno.next(),
             &config.visible_seqno,
         )
     }
@@ -479,7 +480,6 @@ impl AbstractTree for Tree {
                 Ok(copy)
             },
             &self.config.seqno,
-            &self.config.visible_seqno,
         )?;
 
         if let Err(e) = version_lock.maintenance(&self.config.path, gc_watermark) {
