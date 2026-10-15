@@ -8,7 +8,53 @@ use crate::{
     version::{persist_version, Version},
     SeqNo, SequenceNumberCounter,
 };
-use std::{collections::VecDeque, path::Path, sync::Arc};
+use std::{
+    collections::VecDeque,
+    path::Path,
+    sync::{mpsc, Arc, OnceLock},
+};
+
+/// A popped version's memtables.
+type Memtables = (Arc<Memtable>, Arc<SealedMemtables>);
+
+/// Drops a popped `version`: its tables here, its memtables on a thread of
+/// their own.
+///
+/// [`SuperVersions::maintenance`] pops versions while its caller holds the
+/// version history's write lock, and the one it pops can hold the last
+/// reference to a flushed memtable. Freeing that memtable there (a skiplist
+/// of every item it held: over 100 ms for 64 MiB) would hold every reader
+/// and writer of the tree for as long.
+///
+/// A deleted table removes its file when dropped, so tables are dropped
+/// here, as before: removed later, the file could be a reopened tree's.
+fn release(version: SuperVersion) {
+    static RELEASER: OnceLock<Option<mpsc::Sender<Memtables>>> = OnceLock::new();
+
+    let SuperVersion {
+        active_memtable,
+        sealed_memtables,
+        version,
+        seqno: _,
+    } = version;
+    drop(version);
+
+    let sender = RELEASER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<Memtables>();
+        std::thread::Builder::new()
+            .name("lsm-release".into())
+            .spawn(move || receiver.into_iter().for_each(drop))
+            .ok()
+            .map(|_| sender)
+    });
+
+    // With no thread to free them on, they are freed here, as before.
+    if let Some(sender) = sender {
+        if let Err(mpsc::SendError(memtables)) = sender.send((active_memtable, sealed_memtables)) {
+            drop(memtables);
+        }
+    }
+}
 
 /// A super version is a point-in-time snapshot of memtables and a [`Version`] (list of disk files)
 #[derive(Clone)]
@@ -95,7 +141,9 @@ impl SuperVersions {
                     crate::file::retry_transient_io(|| std::fs::remove_file(&path))?;
                 }
 
-                self.0.pop_front();
+                if let Some(version) = self.0.pop_front() {
+                    release(version);
+                }
             }
         }
 
