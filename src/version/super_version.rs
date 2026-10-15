@@ -110,20 +110,34 @@ impl SuperVersions {
     /// and returns a new version.
     ///
     /// The function takes care of persisting the version changes on disk.
+    ///
+    /// The new version's seqno is *not* published as visible. Flushes and
+    /// compactions call this while a write batch may still be inserting its
+    /// items under a lower seqno; publishing a higher one here would let a
+    /// snapshot see that batch partially. Snapshots pick up the new version
+    /// once the next write publishes its seqno.
     pub(crate) fn upgrade_version<F: FnOnce(&SuperVersion) -> crate::Result<SuperVersion>>(
         &mut self,
         tree_path: &Path,
         f: F,
         seqno: &SequenceNumberCounter,
-        visible_seqno: &SequenceNumberCounter,
     ) -> crate::Result<()> {
-        self.upgrade_version_with_seqno(tree_path, f, seqno.next(), visible_seqno)
+        let mut next_version = f(&self.latest_version())?;
+        next_version.seqno = seqno.next();
+        log::trace!("Next version seqno={}", next_version.seqno);
+
+        persist_version(tree_path, &next_version.version)?;
+        self.append_version(next_version);
+
+        Ok(())
     }
 
-    /// Like `upgrade_version`, but takes an already-allocated sequence number.
+    /// Like `upgrade_version`, but takes an already-allocated sequence number,
+    /// and publishes it as visible.
     ///
     /// This is useful when the seqno must be coordinated with other operations
-    /// (e.g., bulk ingestion where tables are recovered with the same seqno).
+    /// (e.g., bulk ingestion where tables are recovered with the same seqno),
+    /// or when the new version changes the tree's contents (e.g., `clear`).
     pub(crate) fn upgrade_version_with_seqno<
         F: FnOnce(&SuperVersion) -> crate::Result<SuperVersion>,
     >(

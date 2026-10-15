@@ -273,7 +273,8 @@ impl AbstractTree for BlobTree {
         let config = self.tree_config();
         let mut versions = self.get_version_history_lock();
 
-        versions.upgrade_version(
+        // Clearing changes the tree's contents, so the new version is published
+        versions.upgrade_version_with_seqno(
             &config.path,
             |v| {
                 let mut copy = v.clone();
@@ -283,7 +284,7 @@ impl AbstractTree for BlobTree {
                 copy.version = Version::new(v.version.id() + 1, self.tree_type());
                 Ok(copy)
             },
-            &config.seqno,
+            config.seqno.next(),
             &config.visible_seqno,
         )
     }
